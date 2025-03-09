@@ -1,9 +1,9 @@
 /*
   Inspired by GRBL universal DRO (grudr11) by jpbbricole
 
-  Use an Arduino Leonardo, Micro or Mega, for multiple serial ports
+  Use an Arduino Mega, for multiple serial ports and sufficient program memory
 
-  Mega is simplest for prototyping with the TFT shield as it means there is still access to TX1/RX1 and other pins
+  Mega is also simple for prototyping with the TFT shield as it means there is still access to TX1/RX1 and other pins
   
   Can operate in one of two hardware configurations:
   1. Inline between the computer running UGS or similar and the second Arduino running GRBL 1.1g or later
@@ -96,14 +96,12 @@ unsigned long lastPolled = millis();
 static unsigned long pollPeriod = 200;
 static constexpr int activityTimeout = 5000;
 static bool backlashCompensation = true;
-static unsigned rotaryScale = 0;
 static bool debugMode = false;
 
-static constexpr const char *jogSteps[] = { "0.001", "0.01", "0.1", "1", "10", nullptr };
-static constexpr unsigned speedRapid = 3;
-static constexpr const char *jogNames[] = { "Fine", "Medium", "Coarse", "Rapid", nullptr };
-static constexpr const char *feedSpeedsMM[] = { "F10", "F20", "F200", "F1000", nullptr };
-static constexpr const char *feedSpeedsInch[] = { "F0.5", "F1", "F8", "F40", nullptr };
+static constexpr const char *jogStepsMM[] = { "0.01", "0.1", };    
+static constexpr const char *jogStepsInch[] = { "0.001", "0.01" };    
+static constexpr const char *feedSpeedsMM[] = { "F200", "F1000" };
+static constexpr const char *feedSpeedsInch[] = { "F8", "F40" };
 
 Stream &ugs = Serial;
 
@@ -264,6 +262,7 @@ bool showMM = true;     // MORE - persist it in EEPROM
 uint8_t jogsActive = 0;   // Could probably be a boolean - we should not send another jog until we see the OK
 // Some way to clear jogsActive in the event that something gets "lost" might be good - e.g. on receipt of an idle status
 // or after a timeout
+// It's really "commands active" - number of things we have sent and not yet seen ok for
 
 void grblStateMachine()
 {
@@ -571,6 +570,11 @@ class FixedPoint
         val = -val;
       return *this;
     }
+    FixedPoint &half()
+    {
+      val /= 2;
+      return *this;
+    }
     FixedPoint &add(const FixedPoint &r)
     {
       val += r.val;
@@ -755,7 +759,7 @@ FixedPointZone WPos[3] = {
   { true, 18, 28, 60, 176 }
 };
 
-void doMoveXY(FixedPoint &x, FixedPoint &y, unsigned speed, bool antiBacklash)
+void doMoveXY(FixedPoint &x, FixedPoint &y, bool rapid, bool antiBacklash)
 {
   if (antiBacklash && (WPos[0].gt(x) || WPos[1].gt(y)))
   {
@@ -765,7 +769,7 @@ void doMoveXY(FixedPoint &x, FixedPoint &y, unsigned speed, bool antiBacklash)
     FixedPoint y1 = y;
     if (WPos[1].gt(y))
       y1.sub(showMM ? backLashOvershoot : backLashOvershootInches);
-    doMoveXY(x1, y1, speed, false);
+    doMoveXY(x1, y1, rapid, false);
   }
   grbl.print("$J=G90"); // jog absolute
   if (showMM)
@@ -776,7 +780,7 @@ void doMoveXY(FixedPoint &x, FixedPoint &y, unsigned speed, bool antiBacklash)
   grbl.print(x.queryStr());
   grbl.print("Y");
   grbl.print(y.queryStr());
-  grbl.println(showMM ? feedSpeedsMM[speed] : feedSpeedsInch[speed]); // MORE - should make this rate configurable!
+  grbl.println(showMM ? feedSpeedsMM[rapid] : feedSpeedsInch[rapid]); // MORE - should make this rate configurable!
   jogsActive++;
 }
 
@@ -785,7 +789,7 @@ void gotoZero(bool axes[3], bool antiBacklash)
   bool xHigh = axes[0] && WPos[0].positive();
   bool yHigh = axes[1] && WPos[1].positive();
   bool zHigh = WPos[2].positive();
-  const char *feedStr = feedSpeedsMM[speedRapid]; // MORE - should make this rate configurable!
+  const char *feedStr = feedSpeedsMM[true]; // MORE - should make this rate configurable!
   if (axes[2] && !zHigh)
   {
     if (antiBacklash)
@@ -822,7 +826,7 @@ void gotoZero(bool axes[3], bool antiBacklash)
   }
 }
 
-void doMove(FixedPoint &to, int axis, unsigned speed)
+void doMove(FixedPoint &to, int axis, bool rapid)
 {
   // MORE - should we consider antibacklash here too?
   grbl.print("$J=G90"); // jog absolute
@@ -832,7 +836,7 @@ void doMove(FixedPoint &to, int axis, unsigned speed)
     grbl.print("G20");  // inches
   grbl.print("XYZ"[axis]);
   grbl.print(to.queryStr()); // NOTE - queryStr converts to showMM units 
-  grbl.println(showMM ? feedSpeedsMM[speed] : feedSpeedsInch[speed]); // MORE - should make this rate configurable!
+  grbl.println(showMM ? feedSpeedsMM[rapid] : feedSpeedsInch[rapid]); // MORE - should make this rate configurable!
   jogsActive++;
 }
 
@@ -991,9 +995,9 @@ class CalcScreen : public Screen
           // Fall through
         case calcModeGoto:
           if (dualCalc)
-            doMoveXY(calcVal, calcVal2, speedRapid, backlashCompensation);
+            doMoveXY(calcVal, calcVal2, true, backlashCompensation);
           else
-            doMove(calcVal, currentAxis, speedRapid);
+            doMove(calcVal, currentAxis, true);
           break;
         case calcModePolar:
         {
@@ -1002,7 +1006,7 @@ class CalcScreen : public Screen
           double theta = (calcVal2.gval() * PI) / 180.0;
           FixedPoint x = cos(theta) * calcVal.gval();
           FixedPoint y = sin(theta) * calcVal.gval();
-          doMoveXY(x, y, speedRapid, backlashCompensation);
+          doMoveXY(x, y, true, backlashCompensation);
           break;
         }
         case calcModeNone:
@@ -1205,15 +1209,153 @@ public:
   }
 } zeroScreen;
 
+class HalfScreen : public Screen
+{
+  enum buttonNames { xButton, yButton, 
+                     cancelButton,
+                     setButton,
+                     gotoButton
+                   };
+  static constexpr unsigned numHalfButtons = 5;
+
+  FixedPointZone halfX = {true, 18, 28, 60, 60};
+  FixedPointZone halfY = {true, 18, 28, 60, 118};
+
+  Button halfButtons[numHalfButtons] = {
+    {"X", true, 10, 62},
+    {"Y", true, 10, 120},
+    {"X", true, 200, 178, ILI9341_RED},
+    {"set", false, 265, 178, ILI9341_GREEN},
+    {"goto", false, 265, 120, ILI9341_GREEN}
+  };
+
+  InfoText halfPrompt = {"Half:", true, 200, 0};
+
+  void showValues()
+  {
+    halfX = WPos[0];
+    halfY = WPos[1];
+    if (half[0])
+      halfX.half();
+    if (half[1])
+      halfY.half();
+    halfX.print();
+    halfY.print();
+  }
+
+  void exitHalfMode(uint8_t pressed)
+  {
+    if (pressed == cancelButton)
+      memcpy(half, saved, sizeof(half));
+    else if (pressed==setButton)
+    {
+      if (half[0])
+      {
+        grbl.print("G10 P0 L20 X");
+        grbl.println(halfX.queryStr());
+        jogsActive++;
+      }
+      if (half[1])
+      {
+        grbl.print("G10 P0 L20 Y");
+        grbl.println(halfY.queryStr());
+        jogsActive++;
+      }
+    }
+    else // must be goto button
+    {
+      if (half[0]&&half[1])
+        doMoveXY(halfX, halfY, true, backlashCompensation);
+      else if (half[0])
+        doMove(halfX, 0, true);
+      else if (half[1])
+        doMove(halfY, 1, true);
+    }
+    enterDROMode();
+  }
+  bool half[2] = { true, true };
+  bool saved[2] = { false, false };
+public:
+  HalfScreen() : Screen(numHalfButtons, halfButtons) 
+  {
+  };
+  void enterHalfMode()
+  {
+    for (uint8_t i = 0; i<2; i++) 
+      buttons[i].select(half[i]);
+    Screen::start();
+    memcpy(saved, half, sizeof(half));
+    showValues();
+    forceRepaint = false;
+  }
+  virtual void onPress(uint8_t pressed) override
+  {
+    switch (pressed)
+    {
+      case xButton:
+      case yButton:
+        half[pressed] = !half[pressed];
+        forceRepaint = true;
+        showValues();
+        buttons[pressed].select(half[pressed]).print();
+        break;
+      case setButton:
+      case cancelButton:
+      case gotoButton:
+        exitHalfMode(pressed);
+        return;
+    }
+  }
+} halfScreen;
+
+static const char **setupString = nullptr;
+static const char *grblSettings [] = {
+  "$0 = 10",      // (Step pulse time, microseconds)
+  "$1 = 25",      // (Step idle delay, milliseconds)
+  "$2 = 0",       // (Step pulse invert, mask)
+  "$3 = 5",       // (Step direction invert, mask)
+  "$4 = 0",       // (Invert step enable pin, boolean)
+  "$5 = 0",       // (Invert limit pins, boolean)
+  "$6 = 0",       // (Invert probe pin, boolean)
+  "$10 = 1",      // (Status report options, mask)
+  "$11 = 0.010",  // (Junction deviation, millimeters)
+  "$12 = 0.002",  // (Arc tolerance, millimeters)
+  "$13 = 0",      //    (Report in inches, boolean)
+  "$20 = 0",      //    (Soft limits enable, boolean)
+  "$21 = 0",      //    (Hard limits enable, boolean)
+  "$22 = 0",      //    (Homing cycle enable, boolean)
+  "$23 = 0",      //    (Homing direction invert, mask)
+  "$24 = 25.0",   //    (Homing locate feed rate, mm/min)
+  "$25 = 500.0",  //    (Homing search seek rate, mm/min)
+  "$26 = 250",    //    (Homing switch debounce delay, milliseconds)
+  "$27 = 1.000",  //    (Homing switch pull-off distance, millimeters)
+  "$30 = 1000",   //   (Maximum spindle speed, RPM)
+  "$31 = 0",      //    (Minimum spindle speed, RPM)
+  "$32 = 0",      //    (Laser-mode enable, boolean)
+  "$100 = 80.0",  //    (X-axis travel resolution, step/mm)
+  "$101 = 80.0",  //    (Y-axis travel resolution, step/mm)
+  "$102 = 160.0", //    (Z-axis travel resolution, step/mm)
+  "$110 = 1000.0", //    (X-axis maximum rate, mm/min)
+  "$111 = 1000.0", //    (Y-axis maximum rate, mm/min)
+  "$112 = 1000.0", //    (Z-axis maximum rate, mm/min)
+  "$120 = 40.0",  //    (X-axis acceleration, mm/sec^2)
+  "$121 = 40.0",  //    (Y-axis acceleration, mm/sec^2)
+  "$122 = 40.0",  //    (Z-axis acceleration, mm/sec^2)
+  "$130 = 200.0", //    (X-axis maximum travel, millimeters) - probably wrong!
+  "$131 = 200.0", //    (Y-axis maximum travel, millimeters). - probably wrong!
+  "$132 = 200.0", //    (Z-axis maximum travel, millimeters). - probably wrong!
+  nullptr
+};
+
 class OptScreen : public Screen
 {
   enum OptButtonNames { optMmButton, optInchButton,
                         optLashOffButton, optLashOnButton,
                         optLimitHighButton, optLimitLowButton,
                         optDebugOffButton, optDebugOnButton,
-                        //optCancelButton,
+                        optDollarButton,
                         optOkButton };
-  static const unsigned numOptButtons = 9;
+  static const unsigned numOptButtons = 10;
   Button optButtons[numOptButtons] = {
     { "mm", false, 10, 4},
     { "inch", false, 65, 4},
@@ -1223,7 +1365,7 @@ class OptScreen : public Screen
     { "low", false, 65, 120},
     { "off", false, 10, 178},
     { "on", false, 65, 178},
-  //  { "X", false, 200, 178, ILI9341_RED},
+    { "$$", false, 265, 4, ILI9341_YELLOW},
     { "O", true, 265, 178, ILI9341_GREEN}
   };
 
@@ -1271,6 +1413,9 @@ class OptScreen : public Screen
         optButtons[optDebugOnButton].select().print();
         optButtons[optDebugOffButton].unselect().print();
         break;
+      case optDollarButton:
+        setupString = grblSettings;
+        break;
       case optOkButton:
         enterDROMode();
         break;
@@ -1304,13 +1449,14 @@ class DROScreen : public Screen
   InfoText feedRate = { "", true, 200, 0, "F:" };
   InfoText scaleZone = { "Fine", false, 200, 18 };
 
-  static constexpr unsigned numDROButtons = 8;
+  static constexpr unsigned numDROButtons = 9;
 
-  enum DROButtonNames { xButton, yButton, zButton, polarButton, moveButton, gotoButton, zeroButton, moreButton };
+  enum DROButtonNames { xButton, yButton, zButton, halfButton, polarButton, moveButton, gotoButton, zeroButton, moreButton };
   Button DRObuttons[numDROButtons] = {
     {"X", true, 10, 62},
     {"Y", true, 10, 120},
     {"Z", true, 10, 178},
+    {"half", false, 205, 62},
     {"polar", false, 265, 62},
     {"move", false, 205, 120},
     {"goto", false, 265, 120},
@@ -1339,7 +1485,7 @@ class DROScreen : public Screen
       pinMode(downPin, INPUT_PULLUP);
     }
   
-    void checkSwitch()
+    void checkSwitch(bool modifier)
     {
       unsigned long now = millis();
       int8_t downNow = 0;
@@ -1355,11 +1501,11 @@ class DROScreen : public Screen
       if (downNow != lastDebouncedState && now - lastPinChange > switchDebounce)
       {
         lastDebouncedState = downNow;
-        onSwitch(axis, downNow);
+        onSwitch(axis, downNow, modifier);
       }
     }
 
-    void onSwitch(uint8_t axis, int8_t dir)
+    void onSwitch(uint8_t axis, int8_t dir, bool rapid)
     {
       if (dir)
       {
@@ -1378,7 +1524,7 @@ class DROScreen : public Screen
             return;
         }
         if (!jogsActive)
-          doMove(*destPoint, axis, rotaryScale);
+          doMove(*destPoint, axis, rapid);
       }
       else
       {
@@ -1401,9 +1547,9 @@ class DROScreen : public Screen
       rotswDown = false;
       onRotSwPress();
     }
-    x_sw.checkSwitch();
-    y_sw.checkSwitch();
-    z_sw.checkSwitch();
+    x_sw.checkSwitch(rotswDown);
+    y_sw.checkSwitch(rotswDown);
+    z_sw.checkSwitch(rotswDown);
   }
 
 public:
@@ -1459,6 +1605,9 @@ public:
       case zeroButton:
         zeroScreen.enterZeroMode();
         break;
+      case halfButton:
+        halfScreen.enterHalfMode();
+        break;
       case moreButton:
         optScreen.enterOptMode();
         break;
@@ -1496,8 +1645,8 @@ public:
           grbl.print("XYZ"[currentAxis]);
           if (jogDistance<0)
             grbl.print('-');
-          grbl.print(jogSteps[rotaryScale + (showMM ? 1 : 0)]);
-          grbl.println(showMM ? "F1000" : "F40"); // MORE - could make this rate configurable.
+          grbl.print((showMM ? jogStepsMM : jogStepsInch)[(rotswDown ? 0 : 1)]);
+          grbl.println(showMM ? "F1000" : "F40"); // MORE - could make this rate configurable. Affects speed if you spin the wheel fast enough to give it a way to go
           jogsActive++;
         }
       }
@@ -1578,12 +1727,7 @@ public:
 
   void onRotSwPress()
   {
-    rotaryScale++;
-    if (!jogNames[rotaryScale])
-      rotaryScale = 0;
-    scaleZone.set(jogNames[rotaryScale]);
-    if (currentScreen==this)
-      scaleZone.print();
+    // Nothing - it's used as an override while pressed
   }
 } droScreen;
 
@@ -1646,6 +1790,17 @@ void loop()
   {
     grblStateMachine();
   }
-  else
-    Screen::currentScreen->screenStateMachine(millis());
+  else if (!jogsActive)
+  {
+    if (setupString && *setupString)
+    {
+      grbl.println(*setupString);
+      jogsActive++;
+      setupString++;
+      if (!*setupString)
+        setupString = nullptr;
+    }
+    else
+      Screen::currentScreen->screenStateMachine(millis());
+  }
 }
