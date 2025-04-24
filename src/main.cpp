@@ -818,7 +818,7 @@ void gotoZero(bool axes[3], bool antiBacklash)
     }
     else
       grbl.print("$J=G90G21Z0");
-    grbl.println(feedStr); 
+    grbl.println(zfeedSpeedsMM[true]); 
   }
   if (axes[0] || axes[1])  
   {
@@ -837,7 +837,7 @@ void gotoZero(bool axes[3], bool antiBacklash)
   if (axes[2] && zHigh)
   {
     grbl.print("$J=G90G21Z0"); // jog absolute
-    grbl.println(feedStr); 
+    grbl.println(zfeedSpeedsMM[true]); 
   }
 }
 
