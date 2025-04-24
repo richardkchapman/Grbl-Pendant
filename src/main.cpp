@@ -101,9 +101,19 @@ static bool debugMode = false;
 static constexpr const char *jogStepsMM[] = { "0.01", "0.1", };    
 static constexpr const char *jogStepsInch[] = { "0.001", "0.01" };    
 static constexpr const char *feedSpeedsMM[] = { "F200", "F1000" };
+static constexpr const char *zfeedSpeedsMM[] = { "F200", "F400" };
 static constexpr const char *feedSpeedsInch[] = { "F8", "F40" };
+static constexpr const char *zfeedSpeedsInch[] = { "F8", "F16" };
 
 Stream &ugs = Serial;
+
+bool switchActive = false;  // Is one of the "continuous jog" switches down?
+uint8_t jogsActive = 0;   // Could probably be a boolean - we should not send another jog until we see the OK
+// Some way to clear jogsActive in the event that something gets "lost" might be good - e.g. on receipt of an idle status
+// or after a timeout
+// It's really "commands active" - number of things we have sent and not yet seen ok for
+
+void grblStateMachine();
 
 class DStream
 {
@@ -125,7 +135,10 @@ public:
     if (sendToUsb)
        ret = Serial.println(c);
     if (sendToGrbl)
+    {
        ret = Serial1.println(c);
+       waitForOk();
+    }
     return ret;
   }
   size_t write(int c) 
@@ -136,6 +149,18 @@ public:
     if (sendToGrbl)
        ret = Serial1.write(c);
     return ret;
+  }
+  void waitForOk()
+  {
+    auto start = millis();
+    jogsActive++;
+    while (jogsActive && millis()-start < 200)
+    {
+      if (available())
+        grblStateMachine();
+      else
+        delay(1);
+    }
   }
   int read() { return Serial1.read(); }
   int available() { return Serial1.available(); }
@@ -258,11 +283,6 @@ uint8_t pos = 0;
 bool readMM = true;     // MORE - read it from $13 somehow
 bool showMM = true;     // MORE - persist it in EEPROM
 
-
-uint8_t jogsActive = 0;   // Could probably be a boolean - we should not send another jog until we see the OK
-// Some way to clear jogsActive in the event that something gets "lost" might be good - e.g. on receipt of an idle status
-// or after a timeout
-// It's really "commands active" - number of things we have sent and not yet seen ok for
 
 void grblStateMachine()
 {
@@ -781,7 +801,6 @@ void doMoveXY(FixedPoint &x, FixedPoint &y, bool rapid, bool antiBacklash)
   grbl.print("Y");
   grbl.print(y.queryStr());
   grbl.println(showMM ? feedSpeedsMM[rapid] : feedSpeedsInch[rapid]); // MORE - should make this rate configurable!
-  jogsActive++;
 }
 
 void gotoZero(bool axes[3], bool antiBacklash)
@@ -800,7 +819,6 @@ void gotoZero(bool axes[3], bool antiBacklash)
     else
       grbl.print("$J=G90G21Z0");
     grbl.println(feedStr); 
-    jogsActive++;
   }
   if (axes[0] || axes[1])  
   {
@@ -810,19 +828,16 @@ void gotoZero(bool axes[3], bool antiBacklash)
       if (xHigh) grbl.print("X-2");
       if (yHigh) grbl.print("Y-2");
       grbl.println(feedStr);
-      jogsActive++;
     }
     grbl.print("$J=G90G21"); // jog absolute
     if (axes[0]) grbl.print("X0");
     if (axes[1]) grbl.print("Y0");
     grbl.println(feedStr);
-    jogsActive++;
   }
   if (axes[2] && zHigh)
   {
     grbl.print("$J=G90G21Z0"); // jog absolute
     grbl.println(feedStr); 
-    jogsActive++;
   }
 }
 
@@ -836,8 +851,10 @@ void doMove(FixedPoint &to, int axis, bool rapid)
     grbl.print("G20");  // inches
   grbl.print("XYZ"[axis]);
   grbl.print(to.queryStr()); // NOTE - queryStr converts to showMM units 
-  grbl.println(showMM ? feedSpeedsMM[rapid] : feedSpeedsInch[rapid]); // MORE - should make this rate configurable!
-  jogsActive++;
+  if (axis==2)
+    grbl.println(showMM ? zfeedSpeedsMM[rapid] : zfeedSpeedsInch[rapid]); 
+  else
+    grbl.println(showMM ? feedSpeedsMM[rapid] : feedSpeedsInch[rapid]); // MORE - should make this rate configurable!
 }
 
 void zeroAxis(int currentAxis)
@@ -845,7 +862,6 @@ void zeroAxis(int currentAxis)
   grbl.print("G10 P0 L20 ");
   grbl.print("XYZ"[currentAxis]);
   grbl.println("0.0");
-  jogsActive++;
 }
 
 class Screen
@@ -1253,13 +1269,11 @@ class HalfScreen : public Screen
       {
         grbl.print("G10 P0 L20 X");
         grbl.println(halfX.queryStr());
-        jogsActive++;
       }
       if (half[1])
       {
         grbl.print("G10 P0 L20 Y");
         grbl.println(halfY.queryStr());
-        jogsActive++;
       }
     }
     else // must be goto button
@@ -1470,8 +1484,8 @@ class DROScreen : public Screen
 
   class DirectionSwitch
   {
-    int8_t lastState = false;           // As read off the pins
-    int8_t lastDebouncedState = false;
+    int8_t lastState = 0;           // As read off the pins
+    int8_t lastDebouncedState = 0;
     unsigned long lastPinChange = 0;
     uint8_t axis;
     uint8_t upPin;
@@ -1523,12 +1537,17 @@ class DROScreen : public Screen
           if (MPos[axis].gtequal(*destPoint))
             return;
         }
-        if (!jogsActive)
-          doMove(*destPoint, axis, rapid);
+        doMove(*destPoint, axis, rapid);
+        switchActive = true;
       }
       else
       {
+        switchActive = false;
+        rotary_position = last_rotary_position;
+        delay(6);
         grbl.write(0x85);    // Cancel the move. 
+        delay(100);
+        grbl.println("G4P0");
       }
     }
   };
@@ -1632,6 +1651,7 @@ public:
       // Probably need to rethink the "idle" bit - desire is to avoid jogging while running a program
       // but also to avoid clashing on serial line when in "sniff" mode.
       //if (now - ugsCmdSeen > activityTimeout)
+      if (!switchActive)
       {
         int jogDistance = rotary_position - last_rotary_position;
         if (jogDistance && !jogsActive)
@@ -1647,7 +1667,6 @@ public:
             grbl.print('-');
           grbl.print((showMM ? jogStepsMM : jogStepsInch)[(rotswDown ? 0 : 1)]);
           grbl.println(showMM ? "F1000" : "F40"); // MORE - could make this rate configurable. Affects speed if you spin the wheel fast enough to give it a way to go
-          jogsActive++;
         }
       }
     }
@@ -1790,12 +1809,11 @@ void loop()
   {
     grblStateMachine();
   }
-  else if (!jogsActive)
+  else
   {
     if (setupString && *setupString)
     {
       grbl.println(*setupString);
-      jogsActive++;
       setupString++;
       if (!*setupString)
         setupString = nullptr;
