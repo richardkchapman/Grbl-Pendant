@@ -100,10 +100,10 @@ static bool debugMode = false;
 
 static constexpr const char *jogStepsMM[] = { "0.01", "0.1", };    
 static constexpr const char *jogStepsInch[] = { "0.001", "0.01" };    
-static constexpr const char *feedSpeedsMM[] = { "F200", "F1000" };
-static constexpr const char *zfeedSpeedsMM[] = { "F200", "F400" };
-static constexpr const char *feedSpeedsInch[] = { "F8", "F40" };
-static constexpr const char *zfeedSpeedsInch[] = { "F8", "F16" };
+static constexpr unsigned feedSpeedsMM[] = { 200, 1000 };
+static constexpr unsigned zfeedSpeedsMM[] = { 200, 400 };
+static constexpr unsigned feedSpeedsInch[] = { 8, 40 };
+static constexpr unsigned zfeedSpeedsInch[] = { 8, 16 };
 
 Stream &ugs = Serial;
 
@@ -153,7 +153,7 @@ public:
   void waitForOk()
   {
     auto start = millis();
-    jogsActive++;
+    jogsActive = 1;
     while (jogsActive && millis()-start < 200)
     {
       if (available())
@@ -161,6 +161,7 @@ public:
       else
         delay(1);
     }
+    jogsActive = 0;
   }
   int read() { return Serial1.read(); }
   int available() { return Serial1.available(); }
@@ -800,6 +801,7 @@ void doMoveXY(FixedPoint &x, FixedPoint &y, bool rapid, bool antiBacklash)
   grbl.print(x.queryStr());
   grbl.print("Y");
   grbl.print(y.queryStr());
+  grbl.print("F");
   grbl.println(showMM ? feedSpeedsMM[rapid] : feedSpeedsInch[rapid]); // MORE - should make this rate configurable!
 }
 
@@ -808,16 +810,15 @@ void gotoZero(bool axes[3], bool antiBacklash)
   bool xHigh = axes[0] && WPos[0].positive();
   bool yHigh = axes[1] && WPos[1].positive();
   bool zHigh = WPos[2].positive();
-  const char *feedStr = feedSpeedsMM[true]; // MORE - should make this rate configurable!
   if (axes[2] && !zHigh)
   {
     if (antiBacklash)
     {
-      grbl.print("$J=G90G21Z1");
+      grbl.print("$J=G90G21Z1F");
       zHigh = true;
     }
     else
-      grbl.print("$J=G90G21Z0");
+      grbl.print("$J=G90G21Z0F");
     grbl.println(zfeedSpeedsMM[true]); 
   }
   if (axes[0] || axes[1])  
@@ -827,16 +828,18 @@ void gotoZero(bool axes[3], bool antiBacklash)
       grbl.print("$J=G90G21"); // jog absolute
       if (xHigh) grbl.print("X-2");
       if (yHigh) grbl.print("Y-2");
-      grbl.println(feedStr);
+      grbl.print("F");
+      grbl.println(feedSpeedsMM[true]);
     }
     grbl.print("$J=G90G21"); // jog absolute
     if (axes[0]) grbl.print("X0");
     if (axes[1]) grbl.print("Y0");
-    grbl.println(feedStr);
+    grbl.print("F");
+    grbl.println(feedSpeedsMM[true]);
   }
   if (axes[2] && zHigh)
   {
-    grbl.print("$J=G90G21Z0"); // jog absolute
+    grbl.print("$J=G90G21Z0F"); // jog absolute
     grbl.println(zfeedSpeedsMM[true]); 
   }
 }
@@ -851,6 +854,7 @@ void doMove(FixedPoint &to, int axis, bool rapid)
     grbl.print("G20");  // inches
   grbl.print("XYZ"[axis]);
   grbl.print(to.queryStr()); // NOTE - queryStr converts to showMM units 
+  grbl.print("F");
   if (axis==2)
     grbl.println(showMM ? zfeedSpeedsMM[rapid] : zfeedSpeedsInch[rapid]); 
   else
