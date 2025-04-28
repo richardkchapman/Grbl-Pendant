@@ -119,7 +119,7 @@ class DStream
 {
 public:
   bool sendToGrbl = true;
-  bool sendToUsb = false;
+  bool sendToUsb = true;
   template<class C> size_t print(C c) 
   {
     size_t ret = Serial2.print(c);
@@ -1495,6 +1495,7 @@ class DROScreen : public Screen
     uint8_t upPin;
     uint8_t downPin;
     static constexpr unsigned long switchDebounce = 10;
+    static constexpr int jogDistance = 1;
 
   public:
     DirectionSwitch(uint8_t _axis, uint8_t up, uint8_t down) : axis(_axis), upPin(up), downPin(down)
@@ -1503,7 +1504,7 @@ class DROScreen : public Screen
       pinMode(downPin, INPUT_PULLUP);
     }
   
-    void checkSwitch(bool modifier)
+    String checkSwitch()
     {
       unsigned long now = millis();
       int8_t downNow = 0;
@@ -1516,12 +1517,14 @@ class DROScreen : public Screen
         lastPinChange = now;
         lastState = downNow;
       }
-      if (downNow != lastDebouncedState && now - lastPinChange > switchDebounce)
-      {
+      if (now - lastPinChange > switchDebounce)
         lastDebouncedState = downNow;
-        onSwitch(axis, downNow, modifier);
-      }
+      return lastDebouncedState ? String("XYZ"[axis]) + (lastDebouncedState*jogDistance) : "";
     }
+
+    // Moves via joystick/zswitch are currently done as a jog to limit in the specified direction, and a cancel when switch is released
+    // This is a bit undesirable as it prevents multiple switches operating (diagonal jogs) and also means we can't alter the speed 
+    // while we jog.
 
     void onSwitch(uint8_t axis, int8_t dir, bool rapid)
     {
@@ -1557,7 +1560,9 @@ class DROScreen : public Screen
   };
 
   DirectionSwitch x_sw, y_sw, z_sw;
-  
+  static constexpr unsigned jogInterval = 50;
+  unsigned long lastJogSent = 0;
+
   void encoderStateMachine(unsigned long now)
   {
     if (digitalRead(ROTSW)==LOW)
@@ -1570,9 +1575,26 @@ class DROScreen : public Screen
       rotswDown = false;
       onRotSwPress();
     }
-    x_sw.checkSwitch(rotswDown);
-    y_sw.checkSwitch(rotswDown);
-    z_sw.checkSwitch(rotswDown);
+    String switchState = x_sw.checkSwitch() + y_sw.checkSwitch();   // Z jogging separate because of differing feed rate
+    if (switchState.length()==0)
+    {
+      if (switchActive)
+      {
+        // Stop any active jogs
+        switchActive = false;
+        rotary_position = last_rotary_position;
+        delay(6);
+        grbl.write(0x85);    // Cancel the move. 
+        delay(1000);
+        grbl.println("G4P0");
+      }
+    }
+    else if (!switchActive || now - lastJogSent > jogInterval)
+    {
+      switchActive = true;
+      grbl.println("$J=G91G21" + switchState + "F" + feedSpeedsMM[rotswDown]);
+      lastJogSent = now;
+    }
   }
 
 public:
