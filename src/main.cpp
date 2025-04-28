@@ -100,14 +100,17 @@ static bool debugMode = false;
 
 static constexpr const char *jogStepsMM[] = { "0.01", "0.1", };    
 static constexpr const char *jogStepsInch[] = { "0.001", "0.01" };    
-static constexpr unsigned feedSpeedsMM[] = { 200, 1000 };
-static constexpr unsigned zfeedSpeedsMM[] = { 200, 400 };
+static constexpr unsigned feedLimitsMM[] = { 500, 1000 };  
+static constexpr unsigned zfeedLimitsMM[] = { 300, 400 };  
+static unsigned feedSpeedsMM[] = { 200, 1000 };
+static unsigned zfeedSpeedsMM[] = { 200, 400 };
 static constexpr unsigned feedSpeedsInch[] = { 8, 40 };
 static constexpr unsigned zfeedSpeedsInch[] = { 8, 16 };
 
 Stream &ugs = Serial;
 
-bool switchActive = false;  // Is one of the "continuous jog" switches down?
+bool switchActive = false;  // XY axes jog switches active
+bool zswitchActive = false;  // Z axes jog switche active
 uint8_t jogsActive = 0;   // Could probably be a boolean - we should not send another jog until we see the OK
 // Some way to clear jogsActive in the event that something gets "lost" might be good - e.g. on receipt of an idle status
 // or after a timeout
@@ -1504,7 +1507,7 @@ class DROScreen : public Screen
       pinMode(downPin, INPUT_PULLUP);
     }
   
-    String checkSwitch()
+    String checkSwitch(bool rapid)
     {
       unsigned long now = millis();
       int8_t downNow = 0;
@@ -1519,48 +1522,13 @@ class DROScreen : public Screen
       }
       if (now - lastPinChange > switchDebounce)
         lastDebouncedState = downNow;
+      float jogDistance = (axis==2 ? zfeedSpeedsMM : feedSpeedsMM)[rapid]/600.0;
       return lastDebouncedState ? String("XYZ"[axis]) + (lastDebouncedState*jogDistance) : "";
     }
-
-    // Moves via joystick/zswitch are currently done as a jog to limit in the specified direction, and a cancel when switch is released
-    // This is a bit undesirable as it prevents multiple switches operating (diagonal jogs) and also means we can't alter the speed 
-    // while we jog.
-
-    void onSwitch(uint8_t axis, int8_t dir, bool rapid)
-    {
-      if (dir)
-      {
-        // Check if we are already beyond endstop, and don't move if we are
-        FixedPoint *destPoint;
-        if (dir<0)
-        {
-          destPoint = &endpointLow[axis];
-          if (destPoint->gtequal(MPos[axis]))
-            return;
-        }
-        else
-        {
-          destPoint = &endpointHigh[axis];
-          if (MPos[axis].gtequal(*destPoint))
-            return;
-        }
-        doMove(*destPoint, axis, rapid);
-        switchActive = true;
-      }
-      else
-      {
-        switchActive = false;
-        rotary_position = last_rotary_position;
-        delay(6);
-        grbl.write(0x85);    // Cancel the move. 
-        delay(100);
-        grbl.println("G4P0");
-      }
-    }
-  };
+};
 
   DirectionSwitch x_sw, y_sw, z_sw;
-  static constexpr unsigned jogInterval = 50;
+  static constexpr unsigned jogInterval = 100;
   unsigned long lastJogSent = 0;
 
   void encoderStateMachine(unsigned long now)
@@ -1575,25 +1543,56 @@ class DROScreen : public Screen
       rotswDown = false;
       onRotSwPress();
     }
-    String switchState = x_sw.checkSwitch() + y_sw.checkSwitch();   // Z jogging separate because of differing feed rate
-    if (switchState.length()==0)
+    // Check XY switch states if Z switches inactive
+    if (!zswitchActive)
     {
-      if (switchActive)
+      String switchState = x_sw.checkSwitch(rotswDown) + y_sw.checkSwitch(rotswDown);   // Z jogging separate because of differing feed rate
+      if (switchState.length()==0)
       {
-        // Stop any active jogs
-        switchActive = false;
-        rotary_position = last_rotary_position;
-        delay(6);
-        grbl.write(0x85);    // Cancel the move. 
-        delay(1000);
-        grbl.println("G4P0");
+        if (switchActive)
+        {
+          // Stop any active jogs
+          switchActive = 0;
+          rotary_position = last_rotary_position;
+          // Cancels do not seem to be reliable. Instead we drip-feed the jogs so we don't ever get too far ahead
+        //  delay(6);
+        //  grbl.write(0x85);    // Cancel the move. 
+        //  delay(1000);
+        //  grbl.println("G4P0");
+        }
+      }
+      else 
+      {
+        if (!switchActive || now - lastJogSent > jogInterval-10)  // -10 is a hack to try to keep speed up without overrun
+        {
+          grbl.println("$J=G91G21" + switchState + "F" + feedSpeedsMM[rotswDown]);
+          lastJogSent = now - (switchActive ? 0 : jogInterval/2);
+          switchActive = true;
+        }
       }
     }
-    else if (!switchActive || now - lastJogSent > jogInterval)
+    // Check Z switch state if XY switches inactive
+    if (!switchActive)
     {
-      switchActive = true;
-      grbl.println("$J=G91G21" + switchState + "F" + feedSpeedsMM[rotswDown]);
-      lastJogSent = now;
+      String zswitchState = z_sw.checkSwitch(rotswDown);      
+      if (zswitchState.length()==0)
+      {
+        if (zswitchActive)
+        {
+          // Stop any active jogs
+          zswitchActive = false;
+          rotary_position = last_rotary_position;
+        }
+      }
+      else 
+      { 
+        if (!zswitchActive || now - lastJogSent > jogInterval-10)  // -10 is a hack to try to keep speed up without overrun
+        {
+          grbl.println("$J=G91G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown]);
+          lastJogSent = now - (zswitchActive ? 0 : jogInterval/2);
+          zswitchActive = true;
+        }
+      }
     }
   }
 
@@ -1660,6 +1659,22 @@ public:
     buttons[pressed].unselect();
   }
 
+  void adjustFeedSpeed(bool z, bool up)
+  {
+    unsigned &speed = (z ? zfeedSpeedsMM : feedSpeedsMM)[false];
+    unsigned limit = (z ? zfeedLimitsMM : feedLimitsMM)[false];
+    if (up)
+    {
+      if (speed + 10 <= limit)
+        speed += 10;
+    }
+    else
+    {
+      if (speed > 10)
+        speed -= 10;
+    }
+  }
+
   virtual void screenStateMachine(unsigned long now) override
   {
     Screen::screenStateMachine(now);
@@ -1677,12 +1692,22 @@ public:
       // Probably need to rethink the "idle" bit - desire is to avoid jogging while running a program
       // but also to avoid clashing on serial line when in "sniff" mode.
       //if (now - ugsCmdSeen > activityTimeout)
-      if (!switchActive)
+      int jogDistance = rotary_position - last_rotary_position;
+      if (jogDistance && !jogsActive)
       {
-        int jogDistance = rotary_position - last_rotary_position;
-        if (jogDistance && !jogsActive)
+        last_rotary_position = rotary_position;  // note - we only use direction not distance. We could change that if we wanted.
+        if (switchActive)
         {
-          last_rotary_position = rotary_position;  // note - we only use direction not distance. We could change that if we wanted.
+          if (!rotswDown)
+            adjustFeedSpeed(false, jogDistance>0);
+        }
+        else if (zswitchActive)
+        {
+          if (!rotswDown)
+            adjustFeedSpeed(true, jogDistance>0);
+        }
+        else
+        {
           grbl.print("$J=G91"); // jog relative
           if (showMM)
             grbl.print("G21");  // mm
