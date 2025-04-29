@@ -1531,21 +1531,29 @@ class DROScreen : public Screen
         lastDebouncedState = downNow;
       if (!lastDebouncedState)
         return "";
-      // Check if we are already beyond endstop, and don't move if we are
-      FixedPoint *destPoint;
-      if (lastDebouncedState<0)
+	  if (smooth)
+	  {
+        float jogDistance = (axis==2 ? zfeedSpeedsMM : feedSpeedsMM)[rapid]/600.0;
+        return String("XYZ"[axis]) + (lastDebouncedState*jogDistance*2);
+	  }
+	  else
       {
-        destPoint = &endpointLow[axis];
-        if (destPoint->gtequal(MPos[axis]))
-          return "";
-      }
-      else // lastDebouncedState>0
-      {
-        destPoint = &endpointHigh[axis];
-        if (MPos[axis].gtequal(*destPoint))
-          return "";
-      }
-      return String("XYZ"[axis]) + destPoint->queryStr();
+        // Check if we are already beyond endstop, and don't move if we are
+        FixedPoint *destPoint;
+        if (lastDebouncedState<0)
+        {
+          destPoint = &endpointLow[axis];
+          if (destPoint->gtequal(MPos[axis]))
+            return "";
+        }
+        else // lastDebouncedState>0
+        {
+          destPoint = &endpointHigh[axis];
+          if (MPos[axis].gtequal(*destPoint))
+            return "";
+        }
+        return String("XYZ"[axis]) + destPoint->queryStr();
+	  }
     }
 };
 
@@ -1578,7 +1586,10 @@ class DROScreen : public Screen
           switchActive = 0;
           rotary_position = last_rotary_position;
           grbl.write(0x85);    // Cancel the move. 
-          lastJog = "";
+          delay(100);
+          grbl.write(0x85);    // Cancel again in case there was a jog "in the chamber". 
+          grbl.println("G4P0");
+		  lastJog = "";
         }
       }
       else 
@@ -1588,15 +1599,23 @@ class DROScreen : public Screen
           unsigned speed = feedSpeedsMM[rotswDown];
           if (x_sw.active() && y_sw.active())
             speed = speed * 1.414;
-          String thisJog = "$J=G90G21" + switchState + "F" + speed;
-          if (!thisJog.equals(lastJog))
-          {
-            grbl.write(0x85);    // Cancel the previous command. 
-            grbl.println(thisJog);
-            lastJog = thisJog;
-          }
-          lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
-          switchActive = true;
+		  if (smooth)
+		  {
+            grbl.println("$J=G91G21" + switchState + "F" + speed);
+            lastJogSent = now - (switchActive ? 0 : jogInterval/2);
+		  }
+		  else
+		  {
+            String thisJog = "$J=G90G21" + switchState + "F" + speed;
+            if (!thisJog.equals(lastJog))
+            {
+              grbl.write(0x85);    // Cancel the previous command. 
+              grbl.println(thisJog);
+              lastJog = thisJog;
+            }
+            lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
+		  }
+		  switchActive = true;
         }
       }
     }
@@ -1612,20 +1631,30 @@ class DROScreen : public Screen
           zswitchActive = false;
           rotary_position = last_rotary_position;
           grbl.write(0x85);    // Cancel the move. 
-          lastJog = "";
+		  delay(100);
+          grbl.write(0x85);    // Cancel again in case there was a jog "in the chamber". 
+          grbl.println("G4P0");
+		  lastJog = "";
         }
       }
       else 
       { 
         if (!zswitchActive || now - lastJogSent > jogInterval-10)  // -10 is a hack to try to keep speed up without overrun
         {
-          String thisJog = "$J=G90G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown];
-          if (!thisJog.equals(lastJog))
-          {
-            grbl.write(0x85);    // Cancel the previous command. 
-            grbl.println(thisJog);
-            lastJog = thisJog;
-          }
+		  if (smooth)
+		  {
+            grbl.println("$J=G91G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown]);
+		  }
+		  else
+		  {
+            String thisJog = "$J=G90G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown];
+            if (!thisJog.equals(lastJog))
+            {
+              grbl.write(0x85);    // Cancel the previous command. 
+              grbl.println(thisJog);
+              lastJog = thisJog;
+            }
+		  }
           lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
           zswitchActive = true;
         }
