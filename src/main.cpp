@@ -1533,17 +1533,19 @@ class DROScreen : public Screen
       if (!lastDebouncedState)
         return "";
       // Check if we are already beyond endstop, and don't move if we are
+      // Endstops are expressed in local coords which could be confusing. It means if you zero an axis you move the endpoints
+      // If we wanted to change that we would need to convert the jog destination.
       FixedPoint *destPoint;
       if (lastDebouncedState<0)
       {
         destPoint = &endpointLow[axis];
-        if (destPoint->gtequal(MPos[axis]))
+        if (destPoint->gtequal(WPos[axis]))
           return "";
       }
       else // lastDebouncedState>0
       {
         destPoint = &endpointHigh[axis];
-        if (MPos[axis].gtequal(*destPoint))
+        if (WPos[axis].gtequal(*destPoint))
           return "";
       }
       return String("XYZ"[axis]) + destPoint->queryStr();
