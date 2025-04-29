@@ -116,6 +116,9 @@ uint8_t jogsActive = 0;   // Could probably be a boolean - we should not send an
 // or after a timeout
 // It's really "commands active" - number of things we have sent and not yet seen ok for
 
+
+static bool smooth = true;
+
 void grblStateMachine();
 
 class DStream
@@ -166,11 +169,11 @@ public:
     }
     if (jogsActive)
     {
-      if (debugMode)
+      //if (debugMode)
         Serial.print("Lost OK");
       write(0x18);
     }
-    else if (debugMode)
+    else //if (debugMode)
       Serial.println(String("OK after ") + (millis()-start) + "ms");
     jogsActive = 0;
   }
@@ -1009,9 +1012,11 @@ class CalcScreen : public Screen
         case calcModeLimitLow:
           endpointLow[currentAxis].set(calcVal);
           // MORE - some error checking eg low is less than high might be nice
+          smooth = false;
           break;
         case calcModeLimitHigh:
           endpointHigh[currentAxis].set(calcVal);
+          smooth = false;
           break;
         case calcModeMove:
           if (dualCalc)
@@ -1464,6 +1469,7 @@ public:
     unitsPrompt.print();
     lashPrompt.print();
     limitsPrompt.print();
+    debugPrompt.print();
     forceRepaint = false;
   }
 } optScreen;
@@ -1531,12 +1537,12 @@ class DROScreen : public Screen
         lastDebouncedState = downNow;
       if (!lastDebouncedState)
         return "";
-	  if (smooth)
-	  {
+      if (smooth)
+      {
         float jogDistance = (axis==2 ? zfeedSpeedsMM : feedSpeedsMM)[rapid]/600.0;
-        return String("XYZ"[axis]) + (lastDebouncedState*jogDistance*2);
-	  }
-	  else
+        return String("XYZ"[axis]) + (lastDebouncedState*jogDistance*2);  // *2 is to ensure we don't "stutter". Bit of a hack.
+      }
+      else
       {
         // Check if we are already beyond endstop, and don't move if we are
         FixedPoint *destPoint;
@@ -1553,12 +1559,12 @@ class DROScreen : public Screen
             return "";
         }
         return String("XYZ"[axis]) + destPoint->queryStr();
-	  }
+    }
     }
 };
 
   DirectionSwitch x_sw, y_sw, z_sw;
-  static constexpr unsigned jogInterval = 500;
+  static constexpr unsigned jogInterval = 100;
   unsigned long lastJogSent = 0;
   String lastJog;
 
@@ -1589,7 +1595,7 @@ class DROScreen : public Screen
           delay(100);
           grbl.write(0x85);    // Cancel again in case there was a jog "in the chamber". 
           grbl.println("G4P0");
-		  lastJog = "";
+          lastJog = "";
         }
       }
       else 
@@ -1599,13 +1605,13 @@ class DROScreen : public Screen
           unsigned speed = feedSpeedsMM[rotswDown];
           if (x_sw.active() && y_sw.active())
             speed = speed * 1.414;
-		  if (smooth)
-		  {
+          if (smooth)
+          {
             grbl.println("$J=G91G21" + switchState + "F" + speed);
             lastJogSent = now - (switchActive ? 0 : jogInterval/2);
-		  }
-		  else
-		  {
+          }
+          else
+          {
             String thisJog = "$J=G90G21" + switchState + "F" + speed;
             if (!thisJog.equals(lastJog))
             {
@@ -1613,9 +1619,9 @@ class DROScreen : public Screen
               grbl.println(thisJog);
               lastJog = thisJog;
             }
-            lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
-		  }
-		  switchActive = true;
+            lastJogSent = now;
+          }
+          switchActive = true;
         }
       }
     }
@@ -1631,22 +1637,22 @@ class DROScreen : public Screen
           zswitchActive = false;
           rotary_position = last_rotary_position;
           grbl.write(0x85);    // Cancel the move. 
-		  delay(100);
+          delay(100);
           grbl.write(0x85);    // Cancel again in case there was a jog "in the chamber". 
           grbl.println("G4P0");
-		  lastJog = "";
+          lastJog = "";
         }
       }
       else 
       { 
-        if (!zswitchActive || now - lastJogSent > jogInterval-10)  // -10 is a hack to try to keep speed up without overrun
+        if (!zswitchActive || now - lastJogSent > jogInterval)
         {
-		  if (smooth)
-		  {
+          if (smooth)
+          {
             grbl.println("$J=G91G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown]);
-		  }
-		  else
-		  {
+          }
+          else
+          {
             String thisJog = "$J=G90G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown];
             if (!thisJog.equals(lastJog))
             {
@@ -1654,8 +1660,8 @@ class DROScreen : public Screen
               grbl.println(thisJog);
               lastJog = thisJog;
             }
-		  }
-          lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
+          }
+          lastJogSent = now ;
           zswitchActive = true;
         }
       }
