@@ -1464,6 +1464,7 @@ public:
     unitsPrompt.print();
     lashPrompt.print();
     limitsPrompt.print();
+    debugPrompt.print();
     forceRepaint = false;
   }
 } optScreen;
