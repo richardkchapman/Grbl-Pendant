@@ -110,7 +110,7 @@ static constexpr unsigned zfeedSpeedsInch[] = { 8, 16 };
 Stream &ugs = Serial;
 
 bool switchActive = false;  // XY axes jog switches active
-bool zswitchActive = false;  // Z axes jog switche active
+bool zswitchActive = false;  // Z axes jog switch active
 uint8_t jogsActive = 0;   // Could probably be a boolean - we should not send another jog until we see the OK
 // Some way to clear jogsActive in the event that something gets "lost" might be good - e.g. on receipt of an idle status
 // or after a timeout
@@ -157,13 +157,21 @@ public:
   {
     auto start = millis();
     jogsActive = 1;
-    while (jogsActive && millis()-start < 200)
+    while (jogsActive && millis()-start < 1000)   // An OK can take a while to come back, in the case of a jog just after a cancel jog. The OK does not come back until the machine has stopped and is ready to restart.
     {
       if (available())
         grblStateMachine();
       else
         delay(1);
     }
+    if (jogsActive)
+    {
+      if (debugMode)
+        Serial.print("Lost OK");
+      write(0x18);
+    }
+    else if (debugMode)
+      Serial.println(String("OK after ") + (millis()-start) + "ms");
     jogsActive = 0;
   }
   int read() { return Serial1.read(); }
@@ -939,13 +947,11 @@ public:
         touching = false;
         if (touchButton >= 0)
         {
+          buttons[touchButton].unselect().print();
           if (longTouchTime && (now - touchStart >= longTouchTime))
             onLongPress(touchButton);
           else
-          {
-            buttons[touchButton].unselect().print();
             onPress(touchButton);
-          }
         }
       }
     }
@@ -1506,7 +1512,8 @@ class DROScreen : public Screen
       pinMode(upPin, INPUT_PULLUP);
       pinMode(downPin, INPUT_PULLUP);
     }
-  
+    inline bool active() { return lastDebouncedState != 0; }
+
     String checkSwitch(bool rapid)
     {
       unsigned long now = millis();
@@ -1522,14 +1529,30 @@ class DROScreen : public Screen
       }
       if (now - lastPinChange > switchDebounce)
         lastDebouncedState = downNow;
-      float jogDistance = (axis==2 ? zfeedSpeedsMM : feedSpeedsMM)[rapid]/600.0;
-      return lastDebouncedState ? String("XYZ"[axis]) + (lastDebouncedState*jogDistance) : "";
+      if (!lastDebouncedState)
+        return "";
+      // Check if we are already beyond endstop, and don't move if we are
+      FixedPoint *destPoint;
+      if (lastDebouncedState<0)
+      {
+        destPoint = &endpointLow[axis];
+        if (destPoint->gtequal(MPos[axis]))
+          return "";
+      }
+      else // lastDebouncedState>0
+      {
+        destPoint = &endpointHigh[axis];
+        if (MPos[axis].gtequal(*destPoint))
+          return "";
+      }
+      return String("XYZ"[axis]) + destPoint->queryStr();
     }
 };
 
   DirectionSwitch x_sw, y_sw, z_sw;
-  static constexpr unsigned jogInterval = 100;
+  static constexpr unsigned jogInterval = 500;
   unsigned long lastJogSent = 0;
+  String lastJog;
 
   void encoderStateMachine(unsigned long now)
   {
@@ -1554,19 +1577,25 @@ class DROScreen : public Screen
           // Stop any active jogs
           switchActive = 0;
           rotary_position = last_rotary_position;
-          // Cancels do not seem to be reliable. Instead we drip-feed the jogs so we don't ever get too far ahead
-        //  delay(6);
-        //  grbl.write(0x85);    // Cancel the move. 
-        //  delay(1000);
-        //  grbl.println("G4P0");
+          grbl.write(0x85);    // Cancel the move. 
+          lastJog = "";
         }
       }
       else 
       {
-        if (!switchActive || now - lastJogSent > jogInterval-10)  // -10 is a hack to try to keep speed up without overrun
+        if (!switchActive || now - lastJogSent > jogInterval)
         {
-          grbl.println("$J=G91G21" + switchState + "F" + feedSpeedsMM[rotswDown]);
-          lastJogSent = now - (switchActive ? 0 : jogInterval/2);
+          unsigned speed = feedSpeedsMM[rotswDown];
+          if (x_sw.active() && y_sw.active())
+            speed = speed * 1.414;
+          String thisJog = "$J=G90G21" + switchState + "F" + speed;
+          if (!thisJog.equals(lastJog))
+          {
+            grbl.write(0x85);    // Cancel the previous command. 
+            grbl.println(thisJog);
+            lastJog = thisJog;
+          }
+          lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
           switchActive = true;
         }
       }
@@ -1582,14 +1611,22 @@ class DROScreen : public Screen
           // Stop any active jogs
           zswitchActive = false;
           rotary_position = last_rotary_position;
+          grbl.write(0x85);    // Cancel the move. 
+          lastJog = "";
         }
       }
       else 
       { 
         if (!zswitchActive || now - lastJogSent > jogInterval-10)  // -10 is a hack to try to keep speed up without overrun
         {
-          grbl.println("$J=G91G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown]);
-          lastJogSent = now - (zswitchActive ? 0 : jogInterval/2);
+          String thisJog = "$J=G90G21" + zswitchState + "F" + zfeedSpeedsMM[rotswDown];
+          if (!thisJog.equals(lastJog))
+          {
+            grbl.write(0x85);    // Cancel the previous command. 
+            grbl.println(thisJog);
+            lastJog = thisJog;
+          }
+          lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
           zswitchActive = true;
         }
       }
@@ -1599,7 +1636,7 @@ class DROScreen : public Screen
 public:
   DROScreen() : Screen(numDROButtons, DRObuttons), x_sw(0, xupPin, xdownPin), y_sw(1, yupPin, ydownPin), z_sw(2, zupPin, zdownPin)
   {
-    longTouchTime = 1000;
+    longTouchTime = 500;
   }
 
   void enterDROMode()
@@ -1619,10 +1656,15 @@ public:
 
   virtual void onLongPress(uint8_t pressed) override
   {
-    if (pressed==currentAxis && !zeroed)
+    switch (pressed)
     {
-      zeroAxis(currentAxis);
-      zeroed = true;
+      case xButton:
+      case yButton:
+      case zButton:
+        if (pressed!=currentAxis)
+          onPress(pressed);
+        zeroAxis(currentAxis);
+        zeroed = true;
     }
   }
   virtual void onPress(uint8_t pressed) override
