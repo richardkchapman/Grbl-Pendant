@@ -101,7 +101,8 @@ class DStream
 {
 public:
   bool sendToGrbl = true;
-  bool sendToUsb = true;
+  bool sendToUsb = false;
+  const char *EOL = "\r";
   template<class C> void print(C c) 
   {
     if (sendToUsb)
@@ -112,10 +113,12 @@ public:
   template<class C> void println(C c)
   {
     if (sendToUsb)
-       Serial.println(c);
+    {
+       Serial.print(c); Serial.print(EOL);
+    }
     if (sendToGrbl)
     {
-       Serial1.println(c);
+       Serial1.print(c); Serial1.print(EOL);
        waitForOk();
     }
   }
@@ -139,11 +142,11 @@ public:
     }
     if (okPending)
     {
-      if (debugMode)
-        Serial.print("Lost OK");
+      if (sendToUsb)
+        Serial.println("Lost OK");
       write(0x18);
     }
-    else if (debugMode)
+    else if (sendToUsb)
       Serial.println(String("OK after ") + (millis()-start) + "ms");
     okPending = false;
   }
@@ -1526,7 +1529,7 @@ class DROScreen : public Screen
 };
 
   DirectionSwitch x_sw, y_sw, z_sw;
-  static constexpr unsigned jogInterval = 500;
+  static constexpr unsigned jogInterval = 100;
   unsigned long lastJogSent = 0;
   String lastJog;
 
@@ -1559,7 +1562,9 @@ class DROScreen : public Screen
       }
       else 
       {
-        if (!switchActive || now - lastJogSent > jogInterval)
+        //if (!switchActive)
+          //lastJogSent = now;  // Delay first jog to give time for diagonal joystick to be properly detected
+        if (!switchState || now - lastJogSent > jogInterval)
         {
           unsigned speed = feedSpeedsMM[rotswDown];
           if (x_sw.active() && y_sw.active())
@@ -1572,8 +1577,8 @@ class DROScreen : public Screen
             lastJog = thisJog;
           }
           lastJogSent = now ;//- (switchActive ? 0 : jogInterval);
-          switchActive = true;
         }
+        switchActive = true;
       }
     }
     // Check Z switch state if XY switches inactive
@@ -1704,6 +1709,7 @@ public:
       if (pollPeriod && now - lastPolled > pollPeriod)
       {
         lastPolled = now;
+        pollPeriod = 200;
         grbl.print('?');
       }
       // if we seem to be idle, enable jogging.
@@ -1831,11 +1837,13 @@ void processLine(char *line)
 
 void setup()
 {
+  Serial1.begin(115200);
+  Serial.begin(115200);
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
   pinMode(zupPin, INPUT_PULLUP);
   pinMode(zdownPin, INPUT_PULLUP);
-  delay(100);
+  setupEncoder();
   if (digitalRead(zupPin)==LOW)
   {
     // Debug mode
@@ -1844,25 +1852,15 @@ void setup()
     pollPeriod = 0;
     debugMode = true;
   }
-  else if (digitalRead(zdownPin)==LOW)
+  else if (digitalRead(ROTSW)==LOW)
   {
     // Observe mode
     grbl.sendToGrbl = false;
     grbl.sendToUsb = false;
     pollPeriod = 0;   // Assumes the PC is observing
   }
-  setupEncoder();
-  Serial.begin(115200);
-  Serial1.begin(115200);
-  // Note:  ugs sends a soft reset immediately after opening the serial port. But opening the serial port resets the arduino
-  // and this means the reset is not actually seen.
-  // In "proxy" mode this is a problem, solvable in various ways:
-  // 1. Modify ugs to sleep before sending the soft reset (which is probably correct)
-  // 2. Modify the pendant hardware to not reset on USB connect
-  // 3. Send a soft reset on startup to make up for the one that we know ugs sent while we were still restarting
-  //    but this is not correct for non-proxy mode and may cause some confusion at ugs end
-  // I have gone for option 1 but if you want to go for option 3, uncomment the line below
-  // Serial1.write('\x18');
+  pollPeriod = 1000;   // Assumes the PC is observing, resetting to 200 if we don't see a poll from PC for 1s
+  
   ts.begin();
   tft.begin();
   tft.setRotation(1);
