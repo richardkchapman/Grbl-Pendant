@@ -102,35 +102,29 @@ class DStream
 public:
   bool sendToGrbl = true;
   bool sendToUsb = true;
-  template<class C> size_t print(C c) 
+  template<class C> void print(C c) 
   {
-    size_t ret = Serial2.print(c);
     if (sendToUsb)
-       ret = Serial.print(c);
+       Serial.print(c);
     if (sendToGrbl)
-       ret = Serial1.print(c);
-    return ret;
+       Serial1.print(c);
   }
-  template<class C> size_t println(C c)
+  template<class C> void println(C c)
   {
-    size_t ret = Serial2.println(c);
     if (sendToUsb)
-       ret = Serial.println(c);
+       Serial.println(c);
     if (sendToGrbl)
     {
-       ret = Serial1.println(c);
+       Serial1.println(c);
        waitForOk();
     }
-    return ret;
   }
-  size_t write(int c) 
+  void write(int c) 
   {
-    size_t ret = Serial2.write(c);
     if (sendToUsb)
-       ret = Serial.write(c);
+       Serial.write(c);
     if (sendToGrbl)
-       ret = Serial1.write(c);
-    return ret;
+       Serial1.write(c);
   }
   void waitForOk()
   {
