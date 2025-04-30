@@ -5,8 +5,9 @@
 
   Mega is also simple for prototyping with the TFT shield as it means there is still access to TX1/RX1 and other pins
   
-  Can operate in one of two hardware configurations:
-  1. Inline between the computer running UGS or similar and the second Arduino running GRBL 1.1g or later
+  Originally designed to operate in one of three hardware configurations:
+  1. Inline between the computer running Universal GCode Sender (UGS) or similar and the second Arduino running 
+     GRBL 1.1h (I have not tried any more recent variants)
      Commands received on the USB port (connected to UGS) are echoed throgh to the second serial port
      (connected to GRBL) and vice versa. Additional commands can be injected as needed - we can guarantee
      no clashes on the serial wire and can tell from sniffing the traffic when UGS is idle. We can also
@@ -16,10 +17,10 @@
      (to do so we would need another serial port on the DRO's Arduino that was not the USB port - might be
      possible on a Mega or using a standalone Atmel chip like an ATMega324)
      It is possible to inject commands to the UGS but they may clash with commands from UGS (resulting in
-     corruption). Injecting jog commands will result in UGS receiving unecpected "ok" responses from GRBL
-     causing it to pop up a dialog. I have modified my copy of UGS to suppress this message but unless/until
-     that change is accepted in the upstream UGS repository (or you modify your own copy of UGS in the same
-     way) this means you can't really jog while connected to UGS via this scheme
+     corruption). Injecting jog commands will result in UGS receiving unexpected "ok" responses from GRBL
+     causing it to give a warning (which can be ignored).
+  3. Standalone as a way of driving my mill. This is actually the way I use it. As a result the 
+     other modes may not be so well tested! Similarly, as I work exclusively in mm the inch support is a little untested.
 
   The program logic and the hardware layout is the same for either technique - the difference is whether you
   connect UGS to the pendant's USB port (mode 1) or to the GRBL controller's USB port (mode 2). Also if using
@@ -29,37 +30,18 @@
   We can use a diode to allow us to safely inject onto the tx line, though a SN74LVC1G07 is better (and probably needed
   if voltage levels don't match, e.g. if using a bluetooth link).
   
-  Other solutions that have been tried (and work okish include using a 4066 chip to gate our output onto tx only when 
-  e are using it, and disabling the tx part of Serial1 using UCSR0B &= ~bit (TXEN0) or similar (depends on board) 
-  when not using t (and thus letting the pin go high impedance).
+  Other solutions that have been tried (and work okish) include using a 4066 chip to gate our output onto tx only when 
+  we are using it, and disabling the tx part of Serial1 using UCSR0B &= ~bit (TXEN0) or similar (depends on board) 
+  when not using it (and thus letting the pin go high impedance).
 
   TODO:
     - Use state==idle to decide whether to allow jogging (we see that even if we don't see traffic from ugs
-    - Add some jogging support (hardware and software)!
-    - Add rotary encoder reading code
+    - Auto-detect connection mode 
 
-  The jogging I have in mind has three use-cases:
-  1. Simple jogging of my Shapeoko so that I can have my computer further away from my (dusty) mill.
-     I will want to be able to jog and zero all three axes. Maybe even support a probe
-  2. Manual control (fine positioning and power feed) of one or two axes of a mini-mill, to save winding
-     handles all the time.
-  3. Auto-stepover when using manual feed on mill
+  The hardware this is attached to has a rotary knob (for fine positioning), a joystick switch for X/Y moves (simple on/off only)
+  and a centre-off toggle switch for Z moves. The rotary knob can also be pressed in to modify the behaviour. There is also a
+  TFT colour touch screen.
 
-  I foresee the following UI:
-  - use rotary knob for fine positioning (coarse/fine via rotary button)
-  - a couple of (on)-off-(on) switches (one for each powered axis) - or perhaps on-off-on will work better?
-  - an option in menu to set soft travel limits that the powerfeed will go to
-    - if you release before it gets there we stop
-  - an option to automatically step a second axis at one or both ends of current axis travel
-
-  Soft buttons - I have room for 6. What should I use them for?
-    - inches/mm
-    - set soft limits
-    - coarse/fine indication ?
-    - RPM lookup table?
-    - calculator ?
-    - Auto-stepover at one or both limits
-    - spindle on/off?
 
   https://github.com/gnea/grbl/wiki/Grbl-v1.1-Jogging describes ways to jog using a joystick, with a focus on how to 
   make the speed reflect the joystick position. I am not planning to put a joystick on this UI (maybe I should!) so
@@ -82,8 +64,8 @@
 // For the Adafruit shield, these are the default.
 #define TFT_DC 9
 #define TFT_CS 10
-// Use hardware SPI (on Uno, #13, #12, #11) and the above for CS/DC
-Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
+
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC); // Use hardware SPI
 Adafruit_FT6206 ts = Adafruit_FT6206();
 
 bool forceRepaint = false;
@@ -109,12 +91,9 @@ static constexpr unsigned zfeedSpeedsInch[] = { 8, 16 };
 
 Stream &ugs = Serial;
 
-bool switchActive = false;  // XY axes jog switches active
+bool switchActive = false;   // XY axes jog switches active
 bool zswitchActive = false;  // Z axes jog switch active
-uint8_t jogsActive = 0;   // Could probably be a boolean - we should not send another jog until we see the OK
-// Some way to clear jogsActive in the event that something gets "lost" might be good - e.g. on receipt of an idle status
-// or after a timeout
-// It's really "commands active" - number of things we have sent and not yet seen ok for
+bool okPending = false;   // We should not send another jog until we see the OK
 
 void grblStateMachine();
 
@@ -156,15 +135,15 @@ public:
   void waitForOk()
   {
     auto start = millis();
-    jogsActive = 1;
-    while (jogsActive && millis()-start < 1000)   // An OK can take a while to come back, in the case of a jog just after a cancel jog. The OK does not come back until the machine has stopped and is ready to restart.
+    okPending = true;
+    while (okPending && millis()-start < 1000)   // An OK can take a while to come back, in the case of a jog just after a cancel jog. The OK does not come back until the machine has stopped and is ready to restart.
     {
       if (available())
         grblStateMachine();
       else
         delay(1);
     }
-    if (jogsActive)
+    if (okPending)
     {
       if (debugMode)
         Serial.print("Lost OK");
@@ -172,7 +151,7 @@ public:
     }
     else if (debugMode)
       Serial.println(String("OK after ") + (millis()-start) + "ms");
-    jogsActive = 0;
+    okPending = false;
   }
   int read() { return Serial1.read(); }
   int available() { return Serial1.available(); }
@@ -304,9 +283,9 @@ void grblStateMachine()
     if (grblState == grblSeenK)
     {
       // Work our whether we want to echo this ok
-      if (jogsActive)
+      if (okPending)
       {
-        jogsActive--;
+        okPending = false;
         c = 0;
       }
       else
@@ -314,12 +293,12 @@ void grblStateMachine()
     }
     else if (grblState==grblSeenDollar)
     {
-      // NOTE - don't send to ugs if we initiated the $$ request (signaled by jogsActive=1)
+      // NOTE - don't send to ugs if we initiated the $$ request (signaled by okPending==true)
       // If we are sniffing, we will just have to hope ugs doesn't mind
       line[pos] = 0;
       if (line[1]=='1' && line[2]=='3' && line[3]=='=')
         readMM = line[4]=='0';
-      if (jogsActive)  // Note - don't mark inactive until we see the final 'ok'
+      if (okPending)  // Note - don't mark inactive until we see the final 'ok'
         c = 0;
       else
         ugs.print(line);
@@ -1738,7 +1717,7 @@ public:
       // but also to avoid clashing on serial line when in "sniff" mode.
       //if (now - ugsCmdSeen > activityTimeout)
       int jogDistance = rotary_position - last_rotary_position;
-      if (jogDistance && !jogsActive)
+      if (jogDistance && !okPending)
       {
         last_rotary_position = rotary_position;  // note - we only use direction not distance. We could change that if we wanted.
         if (switchActive)
